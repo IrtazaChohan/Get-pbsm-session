@@ -1,0 +1,252 @@
+# Function to sign out
+function SignOut {
+    try {
+        Write-Host "Signing out.."
+        $response = Invoke-RestMethod -Uri "${baseUrl}Auth/SignOut" -Method Post -Headers $headers -WebSession $session
+        Write-Host "..Signed out"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Signed out"
+    } catch {
+        Write-Host "Sign-out failed: $($_.Exception.Message)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Sign-out failed $($_.Exception.Message)"
+    }
+}
+
+# Main script
+try {
+    $apiKey = "fd1c8d1a2d44ca6adb3ace8a5a2d810a442c3cad8c583f6db1516942e71bacbf7a8df83a4d4413f1650b4a28db11d8a6aa711e5cdb8d937e66f86ec07320d78f"
+    $runAsUser = "lseg\ichohan-a"
+
+    # Prompt for credentials
+    try {
+        $Credential = Get-Credential -Message "Enter your password (leave blank if not required - hit ESC to bypass):" -UserName $runAsUser
+    } catch {
+        $SecurePassword = ConvertTo-SecureString -String "dummy" -AsPlainText -Force
+        $Credential = New-Object System.Management.Automation.PSCredential($runAsUser, $SecurePassword)
+    }
+
+    # Set the base URL for BeyondTrust
+    $baseUrl = "https://paa.prod.stockex.local/BeyondTrust/api/public/v3/"
+
+    # Forming the Authorization header
+    $headers = @{ Authorization = "PS-Auth key=${apiKey};runas=${runAsUser}" }
+    if ($Credential.Password.Length -gt 0) {
+        $headers.Authorization += ";pwd=[${Credential.GetNetworkCredential().Password}]"
+    }
+
+    # Log directory setup
+    $logDirectory = "C:\Users\ichohan\logs"
+    if (-not (Test-Path $logDirectory)) { New-Item -ItemType Directory -Path $logDirectory }
+
+    # Log file setup
+    $logFile = "$logDirectory\script_log_$(Get-Date -Format 'yyyyMMddHHmmss').txt"
+    Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Script executed by $runAsUser"
+
+    # Sign In Block
+    try {
+        Write-Host "Signing-in.."
+        $signinResult = Invoke-RestMethod -Uri "${baseUrl}Auth/SignAppIn" -Method Post -Headers $headers -SessionVariable session
+        Write-Host "..Signed-In as $($signinResult.UserName)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Signed-In as $($signinResult.UserName)"
+    } catch {
+        Write-Host "Sign-in failed: $($_.Exception.Message)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Sign-in failed $($_.Exception.Message)"
+        if ($_.Exception.Response.StatusCode.value__ -eq 401 -and ($_.Exception.Response.Headers.Contains("WWW-Authenticate-2FA") -eq $true)) {
+            $headers.Authorization += ";challenge=$(Read-Host 'Enter your MFA Challenge Code')"
+            if ($Credential.Password.Length -gt 0) { $headers.Authorization += ";pwd=[${Credential.GetNetworkCredential().Password}]" }
+            try {
+                $mfaSignin = Invoke-RestMethod -Uri "${baseUrl}Auth/SignAppIn" -Method Post -Headers $headers -WebSession $session
+                Write-Host "..Signed-In to BeyondTrust as $($mfaSignin.UserName)"
+                Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Signed-In to BeyondTrust as $($mfaSignin.UserName)"
+            } catch {
+                Write-Host "MFA Sign-in failed: $($_.Exception.Message)"
+                Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): MFA Sign-in failed $($_.Exception.Message)"
+                throw
+            }
+        } else { throw }
+    }
+
+    # Ask if the user knows the SessionID
+    $knowSessionId = Read-Host "Do you know the SessionID? (yes/no)"
+    if ($knowSessionId -eq "yes") {
+        $sessionId = Read-Host "Enter the SessionID of the session you want to replay:"
+        try {
+            Write-Host "Retrieving session details..."
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Retrieving session details"
+            $sessionDetails = Invoke-RestMethod -Uri "${baseUrl}Sessions/$sessionId" -Method Get -Headers $headers -WebSession $session
+            $selectedSession = $sessionDetails
+            Write-Host "Session details retrieved successfully."
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Session details retrieved successfully"
+        } catch {
+            Write-Host "Failed to retrieve session details: $($_.Exception.Message)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to retrieve session details: $($_.Exception.Message)"
+            throw
+        }
+    } else {
+        # Prompt user for input in the specified order
+        $assetNames = Read-Host "Enter the asset names (comma-separated, required if no time range is provided):"
+        $managedAccountNames = Read-Host "Enter the Managed Account Names of Account, ie ""root"" etc (optional, comma-separated, corresponding to assets):"
+        $userIDs = Read-Host "Enter the user IDs of user that initiated the session (optional, comma-separated, corresponding to assets):"
+        $protocol = Read-Host "Enter the protocol (optional, 0 for RDP, 1 for SSH):"
+        $startTime = Read-Host "Enter the start time (optional, e.g., 2024-12-07T00:00:00Z):"
+        $endTime = Read-Host "Enter the end time (optional, e.g., 2024-12-07T23:59:59Z):"
+        $nodeID = Read-Host "Enter the NodeID (optional):"
+
+        # Validate input
+        if (-not $startTime -and -not $endTime -and -not $assetNames) {
+            Write-Host "Asset names are required if no time range is provided."
+            exit
+        }
+
+        # Convert input to arrays
+        $assetNamesArray = $assetNames -split ','
+        $managedAccountNamesArray = $managedAccountNames -split ','
+        $userIDsArray = $userIDs -split ','
+
+        # List sessions with optional filtering
+        try {
+            Write-Host "Retrieving sessions..."
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Retrieving sessions"
+            $sessions = Invoke-RestMethod -Uri "${baseUrl}Sessions" -Method Get -Headers $headers -WebSession $session
+            $filteredSessions = $sessions | Where-Object {
+                ($startTime -eq "" -or $_.StartTime -ge $startTime) -and 
+                ($endTime -eq "" -or $_.EndTime -le $endTime) -and 
+                ($assetNamesArray -contains $_.AssetName) -and 
+                ($userIDsArray -eq "" -or $_.UserID) -and 
+                ($managedAccountNamesArray -eq "" -or $_.ManagedAccountName) -and 
+                ($nodeID -eq "" -or $_.NodeID -eq $nodeID) -and 
+                ($protocol -eq "" -or $_.Protocol -eq [int]$protocol)
+            }
+            Write-Host "Filtered sessions retrieved successfully."
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Filtered sessions retrieved successfully"
+        } catch {
+            Write-Host "Failed to retrieve sessions: $($_.Exception.Message)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to retrieve sessions: $($_.Exception.Message)"
+            throw
+        }
+
+        # Display filtered session details
+        $filteredSessions | ForEach-Object {
+            Write-Host "SessionID: $($_.SessionID), UserID: $($_.UserID), NodeID: $($_.NodeID), Status: $($_.Status), ArchiveStatus: $($_.ArchiveStatus), Protocol: $($_.Protocol), StartTime: $($_.StartTime), EndTime: $($_.EndTime), Duration: $($_.Duration), AssetName: $($_.AssetName), ManagedSystemID: $($_.ManagedSystemID), ManagedAccountID: $($_.ManagedAccountID), ManagedAccountName: $($_.ManagedAccountName), RecordKey: $($_.RecordKey), Token: $($_.Token)"
+        }
+
+        # Export sessions to CSV
+        $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
+        $outputFile = "$logDirectory\sessions_$timestamp.csv"
+        $filteredSessions | Export-Csv -Path $outputFile -NoTypeInformation
+        Write-Host "Sessions exported to $outputFile successfully."
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Sessions exported to $outputFile successfully"
+
+        # Prompt user to select a session for replay
+        $sessionId = Read-Host "Enter the SessionID of the session you want to replay:"
+        $selectedSession = $filteredSessions | Where-Object { $_.SessionID -eq $sessionId }
+
+        if (-not $selectedSession) {
+            Write-Host "Invalid SessionID."
+            exit
+        }
+    }
+
+    # Create a new replay session
+    $replayBody = @{
+        id = $selectedSession.Token
+        record_key = $selectedSession.RecordKey
+        protocol = if ($selectedSession.Protocol -eq 0) { "RDP" } else { "SSH" }
+        headless = $true
+    }
+
+    try {
+        Write-Host "Creating replay session..."
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Creating replay session"
+        Write-Host "Replay Body: $($replayBody | ConvertTo-Json -Depth 3)"  # Debugging information
+        $replayResult = Invoke-RestMethod -Uri "${baseUrl}pbsm/replay" -Method Post -Headers $headers -Body ($replayBody | ConvertTo-Json) -ContentType "application/json" -WebSession $session
+        Write-Host "Replay Result: $($replayResult | ConvertTo-Json -Depth 3)"  # Debugging information
+        $replayId = $replayResult.id
+        Write-Host "Replay session created with ID: $replayId"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Replay session created with ID: $replayId"
+    } catch {
+        Write-Host "Failed to create replay session: $($_.Exception.Message)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to create replay session: $($_.Exception.Message)"
+        throw
+    }
+
+    # Display replay session details
+    try {
+        Write-Host "Retrieving replay session details..."
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Retrieving replay session details"
+        $replayDetails = Invoke-RestMethod -Uri "${baseUrl}pbsm/replay/$replayId?screen=1" -Method Get -Headers $headers -WebSession $session
+        Write-Host "Replay session details: $($replayDetails | ConvertTo-Json -Depth 3)"
+        Write-Host "Text representation of SSH session: $($replayDetails.screen)"
+        Write-Host "Duration of replay session: $($replayDetails.duration) ms"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Replay session details: $($replayDetails | ConvertTo-Json -Depth 3)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Text representation of SSH session: $($replayDetails.screen)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Duration of replay session: $($replayDetails.duration) ms"
+    } catch {
+        Write-Host "Failed to retrieve replay session details: $($_.Exception.Message)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to retrieve replay session details: $($_.Exception.Message)"
+        throw
+    }
+
+    # Control the replay session interactively
+    $replaySpeed = Read-Host "Enter the replay speed as a percentage (e.g., 100 for normal speed):"
+    $replayOffset = Read-Host "Enter the replay offset in milliseconds:"
+    $replayNext = Read-Host "Enter the next frame offset in milliseconds:"
+
+    while ($true) {
+        $controlBody = @{
+            speed = [int]$replaySpeed
+            offset = [int]$replayOffset
+            next = [int]$replayNext
+        }
+
+        try {
+            Write-Host "Controlling replay session..."
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Controlling replay session"
+            $controlResult = Invoke-RestMethod -Uri "${baseUrl}pbsm/replay/$replayId" -Method Put -Headers $headers -Body ($controlBody | ConvertTo-Json) -ContentType "application/json" -WebSession $session
+            Write-Host "Replay session controlled: $($controlResult | ConvertTo-Json -Depth 3)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Replay session controlled: $($controlResult | ConvertTo-Json -Depth 3)"
+        } catch {
+            Write-Host "Failed to control replay session: $($_.Exception.Message)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to control replay session: $($_.Exception.Message)"
+            throw
+        }
+
+        # Display updated replay session details
+        try {
+            Write-Host "Retrieving updated replay session details..."
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Retrieving updated replay session details"
+            $replayDetails = Invoke-RestMethod -Uri "${baseUrl}pbsm/replay/$replayId?screen=1" -Method Get -Headers $headers -WebSession $session
+            Write-Host "Updated replay session details: $($replayDetails | ConvertTo-Json -Depth 3)"
+            Write-Host "Text representation of SSH session: $($replayDetails.screen)"
+            Write-Host "Duration of replay session: $($replayDetails.duration) ms"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Updated replay session details: $($replayDetails | ConvertTo-Json -Depth 3)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Text representation of SSH session: $($replayDetails.screen)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Duration of replay session: $($replayDetails.duration) ms"
+        } catch {
+            Write-Host "Failed to retrieve updated replay session details: $($_.Exception.Message)"
+            Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to retrieve updated replay session details: $($_.Exception.Message)"
+            throw
+        }
+
+        # Check if the end of the replay has been reached
+        if ($replayDetails.eof -eq $true) {
+            Write-Host "End of replay session reached."
+            break
+        }
+    }
+
+    # Delete the replay session
+    try {
+        Write-Host "Deleting replay session..."
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Deleting replay session"
+        Invoke-RestMethod -Uri "${baseUrl}pbsm/replay/$replayId" -Method Delete -Headers $headers -WebSession $session
+        Write-Host "Replay session deleted."
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Replay session deleted"
+    } catch {
+        Write-Host "Failed to delete replay session: $($_.Exception.Message)"
+        Add-Content -Path $logFile -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'): Failed to delete replay session: $($_.Exception.Message)"
+        throw
+    }
+
+} finally {
+    SignOut
+}
