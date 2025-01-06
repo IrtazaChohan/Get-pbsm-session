@@ -1,0 +1,23 @@
+Signing-in..
+..Signed-In as ichohan-a
+Do you know the SessionID? (yes/no): yes     
+Enter the SessionID of the session you want to replay:: 2048553
+Retrieving session details...
+Session details retrieved successfully.
+Creating replay session...
+Replay Body: {
+    "protocol":  "SSH",
+    "record_key":  "268206eca15c892c025cf0a8812b0cee6c2d94f203095e9cb4586bf5935d1f55",
+    "id":  "cff0989d17e08018bd9e599316d8a3a76e30743024d0b82dec6b134f2ac469ae",
+    "headless":  true
+}
+Failed to create replay session: The remote server returned an error: (404) Not Found.
+Signing out..
+..Signed out
+Invoke-RestMethod : {}
+At line:161 char:25
++ ... layResult = Invoke-RestMethod -Uri "${baseUrl}pbsm/replay" -Method Po ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (System.Net.HttpWebRequest:HttpWebRequest) [Invoke-RestMethod], WebEx  
+   ception
+    + FullyQualifiedErrorId : WebCmdletWebResponseException,Microsoft.PowerShell.Commands.InvokeRestMethodCommand      
